@@ -114,3 +114,83 @@ def get_brokers_by_area(area: str) -> list[dict]:
         .execute()
     )
     return result.data or []
+
+
+# ---------------------------------------------------------------------------
+# Pipeline run tracking
+# ---------------------------------------------------------------------------
+
+def create_pipeline_run() -> dict:
+    client = get_client()
+    result = client.table("pipeline_runs").insert({"status": "running"}).execute()
+    run = result.data[0] if result.data else {}
+    logger.info(f"Pipeline run #{run.get('run_number')} started (id={run.get('id')})")
+    return run
+
+
+def complete_pipeline_run(run_id: str, brokers_scraped: int) -> None:
+    from datetime import datetime
+    client = get_client()
+    client.table("pipeline_runs").update({
+        "status": "completed",
+        "completed_at": datetime.utcnow().isoformat(),
+        "brokers_scraped": brokers_scraped,
+    }).eq("id", run_id).execute()
+    logger.info(f"Pipeline run {run_id} completed ({brokers_scraped} brokers)")
+
+
+def fail_pipeline_run(run_id: str) -> None:
+    client = get_client()
+    client.table("pipeline_runs").update({"status": "failed"}).eq("id", run_id).execute()
+    logger.warning(f"Pipeline run {run_id} marked as failed")
+
+
+def save_score_history(broker_id: str, pipeline_run_id: str, run_number: int, scores: dict) -> None:
+    client = get_client()
+    client.table("broker_scores_history").insert({
+        "broker_id": broker_id,
+        "pipeline_run_id": pipeline_run_id,
+        "run_number": run_number,
+        **{k: v for k, v in scores.items() if k.startswith("score_") or k == "total_score"},
+    }).execute()
+
+
+def get_pipeline_runs() -> list[dict]:
+    client = get_client()
+    result = (
+        client.table("pipeline_runs")
+        .select("*")
+        .order("run_number", desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_rankings_for_run(pipeline_run_id: str) -> list[dict]:
+    """Returns brokers with their scores for a specific pipeline run, ranked by total_score."""
+    client = get_client()
+    result = (
+        client.table("broker_scores_history")
+        .select("*, brokers(id, name, area, phone, google_maps_url)")
+        .eq("pipeline_run_id", pipeline_run_id)
+        .order("total_score", desc=True)
+        .execute()
+    )
+    rows = result.data or []
+    # Attach rank position
+    for i, row in enumerate(rows):
+        row["rank"] = i + 1
+    return rows
+
+
+def get_broker_score_history(broker_id: str) -> list[dict]:
+    """Returns full score history for a single broker across all runs."""
+    client = get_client()
+    result = (
+        client.table("broker_scores_history")
+        .select("*, pipeline_runs(run_number, started_at, status)")
+        .eq("broker_id", broker_id)
+        .order("run_number", desc=False)
+        .execute()
+    )
+    return result.data or []

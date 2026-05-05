@@ -60,3 +60,64 @@ export async function fetchAreas(): Promise<string[]> {
 export async function triggerPipeline(): Promise<void> {
   await fetch(`${API_URL}/run/full-pipeline`, { method: "POST" });
 }
+
+// --- Rankings / history types ---
+
+export interface PipelineRun {
+  id: string;
+  run_number: number;
+  started_at: string;
+  completed_at: string | null;
+  brokers_scraped: number;
+  status: "running" | "completed" | "failed";
+}
+
+export interface RankedBroker {
+  id: string;
+  broker_id: string;
+  pipeline_run_id: string;
+  run_number: number;
+  scored_at: string;
+  total_score: number;
+  score_website: number;
+  score_social_media: number;
+  score_google_business: number;
+  score_property_portals: number;
+  score_listings: number;
+  score_linkedin: number;
+  score_video: number;
+  rank: number;
+  brokers: { id: string; name: string; area: string; phone: string | null; google_maps_url: string | null };
+}
+
+export interface BrokerScoreHistoryEntry {
+  run_number: number;
+  scored_at: string;
+  total_score: number;
+  score_website: number;
+  score_social_media: number;
+  score_google_business: number;
+  score_property_portals: number;
+  score_listings: number;
+  score_linkedin: number;
+  score_video: number;
+  pipeline_runs: { run_number: number; started_at: string; status: string };
+}
+
+export async function fetchPipelineRuns(): Promise<PipelineRun[]> {
+  const res = await fetch(`${API_URL}/rankings/runs`, { cache: "no-store" });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function fetchRankingsForRun(runId: string): Promise<RankedBroker[]> {
+  const res = await fetch(`${API_URL}/rankings/run/${runId}`, { cache: "no-store" });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function fetchBrokerScoreHistory(brokerId: string): Promise<BrokerScoreHistoryEntry[]> {
+  const res = await fetch(`${API_URL}/rankings/broker/${brokerId}/history`, { cache: "no-store" });
+  if (!res.ok) return [];
+  return res.json();
+}

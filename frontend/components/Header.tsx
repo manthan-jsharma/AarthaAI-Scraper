@@ -22,12 +22,22 @@ export default function Header() {
   return (
     <header className="border-b border-white/10 bg-[#0a0a0a]/90 backdrop-blur-sm sticky top-0 z-10">
       <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
-        <Link href="/" className="flex items-center gap-2">
-          <span className="text-[#E8B84B] font-bold text-lg tracking-tight">BrokerRank</span>
-          <span className="text-xs text-white/30 font-medium border border-white/10 px-2 py-0.5 rounded-full">
-            Bangalore
-          </span>
-        </Link>
+        <div className="flex items-center gap-6">
+          <Link href="/" className="flex items-center gap-2">
+            <span className="text-[#E8B84B] font-bold text-lg tracking-tight">BrokerRank</span>
+            <span className="text-xs text-white/30 font-medium border border-white/10 px-2 py-0.5 rounded-full">
+              Bangalore
+            </span>
+          </Link>
+          <nav className="flex items-center gap-1">
+            <Link href="/" className="text-sm text-white/40 hover:text-white/80 px-3 py-1.5 rounded-lg transition-colors">
+              Brokers
+            </Link>
+            <Link href="/rankings" className="text-sm text-white/40 hover:text-white/80 px-3 py-1.5 rounded-lg transition-colors">
+              Rankings
+            </Link>
+          </nav>
+        </div>
 
         <div className="flex items-center gap-3">
           {done && (

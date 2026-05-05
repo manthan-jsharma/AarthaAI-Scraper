@@ -73,12 +73,19 @@ export default function BrokerDetailPage() {
   }
 
   const googleData = (broker.google_business_data as Record<string, string> | null) || {};
-  const activeLinks = PORTAL_LINKS.filter((l) => {
-    const val = broker[l.key];
-    if (!val) return false;
-    const s = String(val);
-    return s.startsWith("http://") || s.startsWith("https://");
-  });
+
+  function normalizeUrl(val: unknown): string | null {
+    if (!val) return null;
+    const s = String(val).trim();
+    if (!s) return null;
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    if (s.startsWith("www.")) return `https://${s}`;
+    return null;
+  }
+
+  const activeLinks = PORTAL_LINKS
+    .map((l) => ({ ...l, href: normalizeUrl(broker[l.key]) }))
+    .filter((l) => l.href !== null) as { key: string; label: string; href: string }[];
 
   return (
     <div className="min-h-screen bg-[#0a0a0a]">
@@ -161,10 +168,10 @@ export default function BrokerDetailPage() {
           <div className="bg-[#111111] border border-white/8 rounded-2xl p-6">
             <h2 className="font-semibold text-white mb-4">Profile Links</h2>
             <div className="flex flex-wrap gap-2">
-              {activeLinks.map(({ key, label }) => (
+              {activeLinks.map(({ key, label, href }) => (
                 <a
                   key={key}
-                  href={String(broker[key])}
+                  href={href}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-sm bg-white/5 hover:bg-[#E8B84B]/10 border border-white/10 hover:border-[#E8B84B]/40 text-white/50 hover:text-[#E8B84B] px-4 py-2 rounded-xl transition-all"

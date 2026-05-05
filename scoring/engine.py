@@ -166,9 +166,14 @@ def score_video(website_data: dict, social_data: dict) -> int:
     return min(score, 5)
 
 
-def calculate_and_save_scores(broker: dict) -> dict:
+def calculate_and_save_scores(
+    broker: dict,
+    pipeline_run_id: str | None = None,
+    run_number: int | None = None,
+) -> dict:
+    from database.client import save_score_history
+
     website_data = broker.get("website_data") or {}
-    # If website_url is known but website_data was never populated, credit has_website
     if broker.get("website_url") and not website_data.get("has_website"):
         website_data = {**website_data, "has_website": True}
     social_data = broker.get("social_data") or {}
@@ -192,6 +197,14 @@ def calculate_and_save_scores(broker: dict) -> dict:
 
     logger.info(f"{broker.get('name')} → total score: {scores['total_score']}/100")
     upsert_broker({**broker, **scores})
+
+    # Save snapshot to history if this is part of a tracked pipeline run
+    if pipeline_run_id and run_number is not None and broker.get("id"):
+        try:
+            save_score_history(broker["id"], pipeline_run_id, run_number, scores)
+        except Exception as e:
+            logger.warning(f"Failed to save score history for {broker.get('name')}: {e}")
+
     return scores
 
 

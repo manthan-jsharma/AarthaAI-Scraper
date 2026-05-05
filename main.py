@@ -4,7 +4,11 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from database.client import get_all_brokers, get_brokers_by_area, get_client
+from database.client import (
+    get_all_brokers, get_brokers_by_area, get_client,
+    create_pipeline_run, complete_pipeline_run, fail_pipeline_run,
+    get_pipeline_runs, get_rankings_for_run, get_broker_score_history,
+)
 from scheduler.jobs import start_scheduler, stop_scheduler
 
 
@@ -85,9 +89,21 @@ async def run_full_pipeline(background_tasks: BackgroundTasks):
 
     async def pipeline():
         from insights.groq_engine import generate_insights_for_all
-        await run_discovery()
-        await scrape_all_brokers()
-        await asyncio.to_thread(generate_insights_for_all)
+
+        run = create_pipeline_run()
+        run_id = run.get("id")
+        run_number = run.get("run_number")
+
+        try:
+            brokers = await run_discovery()
+            await scrape_all_brokers(pipeline_run_id=run_id, run_number=run_number)
+            await asyncio.to_thread(generate_insights_for_all)
+            complete_pipeline_run(run_id, brokers_scraped=len(brokers))
+        except Exception as e:
+            logger.error(f"Pipeline failed: {e}")
+            if run_id:
+                fail_pipeline_run(run_id)
+            raise
 
     background_tasks.add_task(pipeline)
     return {"status": "full pipeline started in background"}
@@ -103,21 +119,42 @@ async def export_to_sheets(background_tasks: BackgroundTasks):
 
 @app.post("/run/rescore")
 async def rescore_all(background_tasks: BackgroundTasks):
-    """Re-run scoring on all brokers already in DB — useful after scoring logic changes."""
+    """Re-score all brokers and record a pipeline run snapshot — use this to backfill history."""
     from database.client import get_all_brokers
     from scoring.engine import calculate_and_save_scores
 
     def _rescore():
+        run = create_pipeline_run()
+        run_id = run.get("id")
+        run_number = run.get("run_number")
         brokers = get_all_brokers(limit=500)
+        success = 0
         for broker in brokers:
             try:
-                calculate_and_save_scores(broker)
+                calculate_and_save_scores(broker, pipeline_run_id=run_id, run_number=run_number)
+                success += 1
             except Exception as e:
                 logger.error(f"Rescore failed for {broker.get('name')}: {e}")
-        logger.info(f"Rescore complete for {len(brokers)} brokers")
+        complete_pipeline_run(run_id, brokers_scraped=success)
+        logger.info(f"Rescore complete — run #{run_number}, {success} brokers")
 
     background_tasks.add_task(_rescore)
-    return {"status": f"rescore started in background"}
+    return {"status": "rescore started in background"}
+
+
+@app.get("/rankings/runs")
+def list_pipeline_runs():
+    return get_pipeline_runs()
+
+
+@app.get("/rankings/run/{pipeline_run_id}")
+def rankings_for_run(pipeline_run_id: str):
+    return get_rankings_for_run(pipeline_run_id)
+
+
+@app.get("/rankings/broker/{broker_id}/history")
+def broker_score_history(broker_id: str):
+    return get_broker_score_history(broker_id)
 
 
 @app.get("/health")

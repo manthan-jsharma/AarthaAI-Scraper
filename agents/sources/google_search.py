@@ -2,6 +2,7 @@ import asyncio
 from ddgs import DDGS
 from loguru import logger
 from agents.smart_scraper import smart_scrape
+from agents.schemas import DiscoveredBrokers
 
 SEARCH_QUERIES = [
     "real estate broker agent bangalore koramangala contact phone",
@@ -142,15 +143,15 @@ def _is_blog_url(url: str) -> bool:
 async def _scrape_site(url: str, city: str) -> list[dict]:
     """smart_scrape fetches and extracts broker(s) from any URL — returns a list always."""
     try:
-        result = await smart_scrape(url, SCRAPE_PROMPT)
+        result = await smart_scrape(url, SCRAPE_PROMPT, DiscoveredBrokers)
 
-        # Normalise to list
-        if isinstance(result, list):
+        # Schema mode returns {"brokers": [...]} wrapper — unwrap it
+        if isinstance(result, dict) and "brokers" in result:
+            items = result["brokers"]
+        elif isinstance(result, list):
             items = result
-        elif isinstance(result, dict):
-            items = result.get("brokers", result.get("agents", result.get("content", [])))
-            if not isinstance(items, list):
-                items = [result] if result.get("name") else []
+        elif isinstance(result, dict) and result.get("name"):
+            items = [result]
         else:
             items = []
 

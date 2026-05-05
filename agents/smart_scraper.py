@@ -61,40 +61,62 @@ def clean_html(html: str, max_chars: int = 12000) -> str:
     return cleaned[:max_chars]
 
 
-def ask_gemini(content: str, prompt: str) -> list | dict:
+def ask_gemini(
+    content: str,
+    prompt: str,
+    response_schema: type | None = None,
+) -> list | dict:
+    """
+    Call Gemini to extract structured data from content.
+    When response_schema is provided, Gemini is forced to return valid JSON
+    matching that Pydantic model — no parsing errors possible.
+    Without a schema, falls back to free-form JSON with _safe_json_parse.
+    """
     try:
+        gen_config = genai.GenerationConfig(
+            temperature=0.1,
+            max_output_tokens=2048,
+            **(
+                {"response_mime_type": "application/json", "response_schema": response_schema}
+                if response_schema else {}
+            ),
+        )
         response = _model.generate_content(
             f"{prompt}\n\nPage content:\n{content}",
-            generation_config=genai.GenerationConfig(temperature=0.1, max_output_tokens=8192),
+            generation_config=gen_config,
         )
         raw = response.text.strip()
+
+        if response_schema:
+            # Schema-mode: Gemini guarantees valid JSON, parse directly
+            return json.loads(raw)
+
+        # Free-form mode: strip markdown fences and parse with recovery
         raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
         return _safe_json_parse(raw)
+
     except Exception as e:
         logger.error(f"Gemini extraction failed: {e}")
         return {}
 
 
 def _safe_json_parse(raw: str) -> list | dict:
-    """Parse JSON, recovering from truncated output by finding the last valid bracket."""
+    """Fallback JSON parser with truncation recovery — only used without response_schema."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
-    # Try to salvage a truncated JSON array — find the last complete item
     try:
         if raw.startswith("["):
             last_close = raw.rfind("},")
             if last_close == -1:
                 last_close = raw.rfind("}")
             if last_close != -1:
-                recovered = raw[: last_close + 1] + "]"
-                return json.loads(recovered)
+                return json.loads(raw[: last_close + 1] + "]")
     except Exception:
         pass
 
-    # Try to salvage a truncated JSON object
     try:
         if raw.startswith("{"):
             last_close = raw.rfind("}")
@@ -106,10 +128,13 @@ def _safe_json_parse(raw: str) -> list | dict:
     return {}
 
 
-async def smart_scrape(url: str, prompt: str) -> list | dict:
+async def smart_scrape(
+    url: str,
+    prompt: str,
+    response_schema: type | None = None,
+) -> list | dict:
     html = await fetch_html(url)
     if not html:
         return {}
     content = clean_html(html)
-    result = await asyncio.to_thread(ask_gemini, content, prompt)
-    return result
+    return await asyncio.to_thread(ask_gemini, content, prompt, response_schema)
