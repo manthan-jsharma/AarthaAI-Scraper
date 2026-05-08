@@ -7,7 +7,7 @@ from database.client import upsert_broker
 from agents.sources import instagram, google_maps
 from agents.smart_scraper import smart_scrape
 from agents.scrapfly_scraper import scrapfly_scrape
-from agents.sources.portal_url_finder import find_portal_urls
+from agents.sources.portal_url_finder import find_missing_urls
 from agents.schemas import WebsiteData, PortalProfile, LinkedInProfile
 
 
@@ -45,9 +45,9 @@ Extract the following from this LinkedIn profile page and return as JSON:
 - avg_comments: average comments on recent posts (or null)
 - has_property_content: boolean — do posts mention real estate, properties, or listings?
 - bio: short professional headline or summary (or null)
+- website: website URL shown on the profile (or null)
 """
 
-# Portal URL keys that Scrapfly should scrape (bot-protected sites)
 PORTAL_KEYS = [
     ("magicbricks", "magicbricks_url"),
     ("99acres",     "acres99_url"),
@@ -56,7 +56,6 @@ PORTAL_KEYS = [
     ("justdial",    "justdial_url"),
 ]
 
-# LinkedIn Scrapfly config — US proxy works better than IN for LinkedIn
 _LINKEDIN_SCRAPE_KWARGS = {
     "country": "US",
     "headers": {"Accept-Language": "en-US,en;q=0.5"},
@@ -64,10 +63,6 @@ _LINKEDIN_SCRAPE_KWARGS = {
 
 
 def _presence_score(broker: dict) -> int:
-    """
-    Count how many key data sources a broker has a presence on.
-    Used to decide whether LinkedIn scraping is worth spending credits on.
-    """
     score = 0
     if broker.get("google_maps_url"):
         score += 1
@@ -79,12 +74,6 @@ def _presence_score(broker: dict) -> int:
 
 
 def _should_scrape_linkedin(broker: dict, budget: dict) -> bool:
-    """
-    Only scrape LinkedIn if:
-    - broker has a linkedin_url
-    - broker has presence on at least 2 other sources (worth the credit spend)
-    - pipeline budget for LinkedIn scrapes hasn't been exhausted
-    """
     if not broker.get("linkedin_url"):
         return False
     if budget["remaining"] <= 0:
@@ -97,10 +86,6 @@ def _should_scrape_linkedin(broker: dict, budget: dict) -> bool:
 
 
 def _promote_social_links(broker: dict, website_data: dict) -> dict:
-    """
-    Scan social_links from website scrape and promote instagram/linkedin URLs
-    to top-level broker fields if not already set.
-    """
     social_links = website_data.get("social_links") or []
     if not social_links:
         return {}
@@ -113,7 +98,6 @@ def _promote_social_links(broker: dict, website_data: dict) -> dict:
         if not url:
             continue
         url_lower = url.lower()
-
         if "instagram.com" in url_lower and not broker.get("instagram_url"):
             promoted["instagram_url"] = url
         elif "linkedin.com" in url_lower and not broker.get("linkedin_url"):
@@ -123,21 +107,6 @@ def _promote_social_links(broker: dict, website_data: dict) -> dict:
         logger.info(f"Promoted social links for '{broker['name']}': {list(promoted.keys())}")
 
     return promoted
-
-
-async def _discover_missing_portal_urls(broker: dict) -> dict:
-    """
-    For any portal URL not yet in the broker record, run a DDG lookup
-    to find their profile page. Returns only newly found {key: url} pairs.
-    """
-    missing = [key for _, key in PORTAL_KEYS if not broker.get(key)]
-    if not missing:
-        return {}
-
-    logger.info(f"Finding portal URLs for '{broker['name']}' (missing: {missing})")
-    found = await find_portal_urls(broker["name"], broker.get("city", "Bangalore"))
-
-    return {k: v for k, v in found.items() if k in missing}
 
 
 async def scrape_broker(
@@ -156,37 +125,37 @@ async def scrape_broker(
     broker = result.data[0]
     updates = {"last_scraped_at": datetime.utcnow().isoformat()}
 
-    # --- Step 1: discover missing portal profile URLs via DDG ---
-    new_portal_urls = await _discover_missing_portal_urls(broker)
-    if new_portal_urls:
-        updates.update(new_portal_urls)
-        broker = {**broker, **new_portal_urls}
-        logger.info(f"Discovered portal URLs for '{broker['name']}': {list(new_portal_urls.keys())}")
+    # DDG search query shape depends on what we know:
+    #   MagicBricks/portal → individual_name + agency_name → "{agency}" "{name}" real estate {city}
+    #   JustDial           → agency only                   → "{agency}" real estate {city}
+    #   Google Maps only   → business name as agency        → "{name}" real estate {city}
+    individual_name = None
+    agency_name = broker.get("name")  # fallback: use broker name as agency for DDG
 
-    # --- Step 2: website scrape (local Playwright — broker sites aren't bot-protected) ---
-    if broker.get("website_url"):
-        logger.info(f"Scraping website for {broker['name']}")
-        result_data = await smart_scrape(broker["website_url"], WEBSITE_PROMPT, WebsiteData)
-        website_data = result_data if isinstance(result_data, dict) else {}
-        updates["website_data"] = website_data
-
-        # Promote instagram/linkedin found on the website to top-level fields
-        social_promoted = _promote_social_links(broker, website_data)
-        if social_promoted:
-            updates.update(social_promoted)
-            broker = {**broker, **social_promoted}
-
-    # --- Step 3: portal scrapes via Scrapfly ---
+    # --- Step 1: Portal scrapes (MagicBricks, 99acres, Housing, NoBroker, JustDial) ---
+    # Run first so we get individual name + agency for DDG search later
     portal_data = {}
     for portal_key, url_key in PORTAL_KEYS:
         if broker.get(url_key):
             logger.info(f"Scraping {portal_key} for {broker['name']}")
             result_data = await scrapfly_scrape(broker[url_key], PORTAL_PROMPT, response_schema=PortalProfile)
             portal_data[portal_key] = result_data if isinstance(result_data, dict) else {}
+
+            pdata = portal_data[portal_key]
+            # Capture individual name + agency from first portal that has them
+            if not individual_name and pdata.get("name"):
+                individual_name = pdata["name"]
+            if not agency_name and pdata.get("agency"):
+                agency_name = pdata["agency"]
+            # Promote phone from portal if not yet known
+            if pdata.get("phone") and not broker.get("phone"):
+                updates["phone"] = pdata["phone"]
+                broker = {**broker, "phone": pdata["phone"]}
+
     if portal_data:
         updates["portal_data"] = portal_data
 
-    # --- Step 4: Google Maps detail (always — gets phone + website) ---
+    # --- Step 2: Google Maps detail (phone + website) ---
     if broker.get("google_maps_url"):
         existing = broker.get("google_business_data") or {}
         logger.info(f"Scraping Google Maps details for {broker['name']}")
@@ -198,24 +167,52 @@ async def scrape_broker(
                 updates["phone"] = scraped["phone"]
             if scraped.get("website") and not broker.get("website_url"):
                 updates["website_url"] = scraped["website"]
+                broker = {**broker, "website_url": scraped["website"]}
         else:
             updates["google_business_data"] = existing
 
-    # --- Step 5: LinkedIn — only for high-presence brokers, capped per pipeline run ---
+    # --- Step 3: Website scrape (social links → instagram/linkedin) ---
+    if broker.get("website_url"):
+        logger.info(f"Scraping website for {broker['name']}")
+        result_data = await smart_scrape(broker["website_url"], WEBSITE_PROMPT, WebsiteData)
+        website_data = result_data if isinstance(result_data, dict) else {}
+        updates["website_data"] = website_data
+
+        social_promoted = _promote_social_links(broker, website_data)
+        if social_promoted:
+            updates.update(social_promoted)
+            broker = {**broker, **social_promoted}
+
+    # --- Step 4: DDG search for missing URLs ---
+    # Now we have individual_name + agency from portal scrapes — specific enough for LinkedIn
+    new_urls = await find_missing_urls(broker, individual_name, agency_name)
+    if new_urls:
+        updates.update(new_urls)
+        broker = {**broker, **new_urls}
+        logger.info(f"DDG found new URLs for '{broker['name']}': {list(new_urls.keys())}")
+
+    # --- Step 5: LinkedIn scrape ---
     _budget = linkedin_budget or {"remaining": 0}
     if _should_scrape_linkedin(broker, _budget):
-        logger.info(f"Scraping LinkedIn for '{broker['name']}' "
-                    f"(budget remaining: {linkedin_budget['remaining']})")
+        logger.info(
+            f"Scraping LinkedIn for '{broker['name']}' "
+            f"(budget remaining: {_budget['remaining']})"
+        )
         result_data = await scrapfly_scrape(
             broker["linkedin_url"],
             LINKEDIN_PROMPT,
             response_schema=LinkedInProfile,
             **_LINKEDIN_SCRAPE_KWARGS,
         )
-        updates["linkedin_data"] = result_data if isinstance(result_data, dict) else {}
+        linkedin_data = result_data if isinstance(result_data, dict) else {}
+        updates["linkedin_data"] = linkedin_data
         _budget["remaining"] -= 1
+        # Promote website URL from LinkedIn if not yet known
+        if linkedin_data.get("website") and not broker.get("website_url"):
+            updates["website_url"] = linkedin_data["website"]
+            broker = {**broker, "website_url": linkedin_data["website"]}
 
-    # --- Step 6: Instagram (stubbed — URL promoted from website, content not scraped yet) ---
+    # --- Step 6: Instagram ---
     if broker.get("instagram_url"):
         updates["instagram_data"] = await instagram.get_profile_data(broker["instagram_url"])
 

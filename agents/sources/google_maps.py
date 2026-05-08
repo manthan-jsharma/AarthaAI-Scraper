@@ -1,8 +1,20 @@
+import re
+from urllib.parse import unquote
 from playwright.async_api import async_playwright
 from loguru import logger
 
 
-async def discover_brokers(city: str = "Bangalore", max_results: int = 50) -> list[dict]:
+def _unwrap_google_url(url: str | None) -> str | None:
+    """Extract clean URL from Google redirect wrapper (/url?q=https://...)."""
+    if not url:
+        return None
+    match = re.search(r'[?&]q=(https?://[^&]+)', url)
+    if match:
+        return unquote(match.group(1))
+    return url
+
+
+async def discover_brokers(city: str = "Bangalore", max_results: int = 10) -> list[dict]:
     brokers = []
     query = f"real estate broker {city}"
     url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
@@ -74,7 +86,9 @@ async def get_business_details(maps_url: str) -> dict:
 
             data["rating"] = await _safe_text_page(page, "[class*='fontDisplayLarge']")
             data["review_count"] = await _safe_text_page(page, "[class*='fontBodySmall'] span[aria-label*='review']")
-            data["website"] = await _safe_attr_page(page, "a[data-item-id='authority']", "href")
+            data["website"] = _unwrap_google_url(
+                await _safe_attr_page(page, "a[data-item-id='authority']", "href")
+            )
 
             # Phone: try aria-label on the phone button first (most reliable)
             phone = await _safe_attr_page(page, "button[data-item-id*='phone']", "aria-label")
@@ -90,7 +104,10 @@ async def get_business_details(maps_url: str) -> dict:
                     }
                     return null;
                 }""")
-            data["phone"] = phone
+            # Strip "Phone: " prefix that sometimes appears in aria-label
+            if phone:
+                phone = re.sub(r"^Phone:\s*", "", phone.strip(), flags=re.IGNORECASE)
+            data["phone"] = phone or None
 
             await browser.close()
     except Exception as e:

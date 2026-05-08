@@ -114,6 +114,119 @@ def _is_sufficient(data: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Directory page link extraction (no Gemini needed)
+# ---------------------------------------------------------------------------
+
+def extract_profile_links(html: str, url_pattern: str, base_url: str) -> list[dict]:
+    """
+    Extract agent profile URLs from a portal directory page.
+
+    Two-pass strategy:
+    Pass 1 — <a href> tags (standard links)
+    Pass 2 — regex across full HTML (catches JS onClick, data attrs, embedded JSON)
+
+    Returns list of {name, profile_url}.
+    """
+    import re
+
+    results = []
+    seen_urls: set[str] = set()
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Pass 1: standard <a href> tags
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if url_pattern not in href:
+                continue
+            full_url = (base_url.rstrip("/") + href) if href.startswith("/") else href
+            if full_url in seen_urls:
+                continue
+            seen_urls.add(full_url)
+
+            name = a.get_text(strip=True)
+            if not name or len(name) > 80:
+                for parent in a.parents:
+                    txt = parent.get_text(separator=" ", strip=True)
+                    if 2 < len(txt) < 80 and len(txt.split()) <= 8:
+                        name = txt
+                        break
+
+            if name and 2 < len(name) < 80:
+                results.append({"name": name, "profile_url": full_url})
+
+        # Pass 2: regex across entire HTML (handles JS-rendered links, onclick, JSON blobs)
+        if not results:
+            escaped = re.escape(url_pattern)
+            raw_urls = re.findall(
+                rf'(?:{re.escape(base_url)})?({escaped}[^\s"\'<>\\]+)',
+                html,
+            )
+            for path in dict.fromkeys(raw_urls):  # deduplicate, preserve order
+                full_url = base_url.rstrip("/") + path if path.startswith("/") else path
+                if full_url in seen_urls:
+                    continue
+                seen_urls.add(full_url)
+                # Derive name from slug: company-{name}-in-{city}-agentid-{hex}
+                slug = path.split("/")[-1]
+                match = re.search(r"^(?:company-)?(.+?)-in-[a-z]+-agentid-", slug, re.IGNORECASE)
+                if match:
+                    name = match.group(1).replace("-", " ").title().strip()
+                else:
+                    # Fallback: strip agentid + city suffix best-effort
+                    slug = re.sub(r"-agentid-[a-f0-9]+$", "", slug, flags=re.IGNORECASE)
+                    slug = re.sub(r"-in-[a-z\-]+$", "", slug)
+                    slug = re.sub(r"^company-", "", slug)
+                    name = slug.replace("-", " ").title().strip()
+                if name:
+                    results.append({"name": name, "profile_url": full_url})
+
+    except Exception as e:
+        logger.warning(f"extract_profile_links failed: {e}")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Raw HTML fetch (used by portal discovery sources)
+# ---------------------------------------------------------------------------
+
+async def scrapfly_fetch(
+    url: str,
+    use_js: bool = True,
+    country: str = "IN",
+    rendering_wait: int = 3000,
+    headers: dict | None = None,
+) -> str:
+    """Fetch raw HTML via Scrapfly. Returns empty string on failure."""
+    if not settings.scrapfly_key:
+        logger.warning(f"SCRAPFLY_KEY not set — cannot fetch {url[:60]}")
+        return ""
+    try:
+        from scrapfly import ScrapflyClient, ScrapeConfig
+        client = ScrapflyClient(key=settings.scrapfly_key)
+        result = await client.async_scrape(ScrapeConfig(
+            url=url,
+            asp=True,
+            render_js=use_js,
+            country=country,
+            rendering_wait=rendering_wait,
+            headers=headers or {},
+        ))
+        html = result.content or ""
+        status = result.upstream_status_code
+        cost = result.context.get("cost", "?")
+        logger.info(f"Scrapfly fetch {url[:60]} | status={status} cost={cost} len={len(html)}")
+        if status and status >= 400:
+            return ""
+        return html
+    except Exception as e:
+        logger.error(f"Scrapfly fetch failed for {url[:60]}: {e}")
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # HTML → plain text (Layer 2 fallback — denser than markdown, fewer tokens)
 # ---------------------------------------------------------------------------
 
@@ -159,7 +272,6 @@ async def scrapfly_scrape(
             asp=True,
             render_js=use_js,
             country=country,
-            format="raw",          # raw HTML — we process locally, one API call
             rendering_wait=3000,
             headers=headers or {},
         ))

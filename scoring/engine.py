@@ -67,19 +67,28 @@ def score_linkedin(data: dict) -> int:
         return 0
     score = 0
 
-    posts_30d = _to_int(data.get("posts_last_30_days"))
-    if posts_30d and posts_30d >= 1:
-        score += 5
-
+    # Followers / connections
     connections = _to_int(data.get("connections") or data.get("followers"))
     if connections:
         if connections >= 500:
-            score += 3
+            score += 4
         elif connections >= 100:
+            score += 2
+        elif connections >= 10:
             score += 1
 
-    if data.get("is_active"):
+    # Post activity (not always visible without login — bonus when available)
+    posts_30d = _to_int(data.get("posts_last_30_days"))
+    if posts_30d and posts_30d >= 1:
+        score += 3
+
+    # Profile has real estate content
+    if data.get("has_property_content"):
         score += 2
+
+    # Profile was accessible enough to extract a bio
+    if data.get("bio"):
+        score += 1
 
     return min(score, 10)
 
@@ -114,24 +123,36 @@ def score_google_business(data: dict) -> int:
     return min(score, 15)
 
 
-def score_property_portals(portal_data: dict) -> int:
+def score_property_portals(portal_data: dict, broker: dict | None = None) -> int:
     """Max 15 points — across all portals combined."""
-    if not portal_data:
-        return 0
     score = 0
-    active_portals = 0
+    scored_portals: set[str] = set()
 
-    for portal_name, data in portal_data.items():
+    # Rich data from fully scraped portals
+    for portal_name, data in (portal_data or {}).items():
         if not data:
             continue
-        active_portals += 1
+        scored_portals.add(portal_name)
         if data.get("profile_complete"):
             score += 2
         rating = _to_float(data.get("rating"))
         if rating and rating >= 4.0:
             score += 1
 
-    score += min(active_portals * 2, 8)
+    # Presence points for portals found via DDG but not fully scraped
+    if broker:
+        url_map = {
+            "magicbricks": "magicbricks_url",
+            "99acres":      "acres99_url",
+            "housing":      "housing_url",
+            "nobroker":     "nobroker_url",
+            "justdial":     "justdial_url",
+        }
+        for portal_name, url_field in url_map.items():
+            if portal_name not in scored_portals and broker.get(url_field):
+                scored_portals.add(portal_name)
+
+    score += min(len(scored_portals) * 2, 8)
     return min(score, 15)
 
 
@@ -158,7 +179,7 @@ def score_listings(portal_data: dict) -> int:
 def score_video(website_data: dict, social_data: dict) -> int:
     """Max 5 points — YouTube or video content presence."""
     score = 0
-    social_links = (website_data or {}).get("social_links", [])
+    social_links = (website_data or {}).get("social_links") or []
     if any("youtube" in str(link).lower() for link in social_links):
         score += 5
     elif any("video" in str(link).lower() or "reel" in str(link).lower() for link in social_links):
@@ -189,7 +210,7 @@ def calculate_and_save_scores(
         "score_social_media": score_social_media(combined_social),
         "score_linkedin": score_linkedin(linkedin_data),
         "score_google_business": score_google_business(google_data),
-        "score_property_portals": score_property_portals(portal_data),
+        "score_property_portals": score_property_portals(portal_data, broker),
         "score_listings": score_listings(portal_data),
         "score_video": score_video(website_data, combined_social),
     }

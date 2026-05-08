@@ -1,36 +1,91 @@
 """
-DDG-based portal profile URL lookup.
-For each broker we already know, searches each portal site to find their
-individual agent profile URL, which Scrapfly then scrapes.
+DDG-based URL finder for brokers.
+
+Query strategy:
+  Primary:  "{agency}" {name} real estate {city} {platform}
+            — agency quoted (exact), individual name unquoted (context hint)
+            — when name == agency, name is omitted to avoid redundancy
+  Fallback: "{agency}" real estate {city} {platform}
+            — agency only, no individual name
+
+Quoting only the agency name (not the individual name) avoids false positives
+from common first names hitting unrelated results (e.g. "Salman" → Salman Khan).
+
+MagicBricks and 99acres excluded — noindex/nofollow, DDG has never indexed them.
 """
 import asyncio
 from ddgs import DDGS
 from loguru import logger
 
 
-# Each portal: DDG site-search query + URL validation rule
-PORTAL_SEARCH: dict[str, dict] = {
-    "magicbricks_url": {
-        "query": 'site:magicbricks.com "{name}" bangalore real estate agent',
-        "valid": lambda u: "magicbricks.com" in u and (
-            "agent-profile" in u or "realestate-agent" in u
+_WEBSITE_EXCLUDE = [
+    # property portals
+    "magicbricks", "99acres", "housing.com", "nobroker", "justdial",
+    "realestateindia.com", "commonfloor", "proptiger", "squareyards",
+    "makaan", "sulekha", "olx", "indiamart",
+    # social / search
+    "linkedin", "instagram", "facebook", "youtube", "twitter", "google.com",
+    # knowledge / forums
+    "wikipedia", "quora", "reddit",
+    # RE associations (not a broker's own site)
+    "brai.in", "naredco", "credai",
+    # news sites
+    "timesofindia", "ndtv", "thehindu", "hindustantimes",
+    "mumbainewsexpress", "economictimes", "moneycontrol",
+]
+
+# {agency} = quoted company name anchor
+# {name}   = unquoted individual name (only appended when different from agency)
+# {city}   = city (default: Bangalore)
+SEARCH_TARGETS: dict[str, dict] = {
+    "linkedin_url": {
+        "queries": [
+            '"{agency}" {name} real estate {city} linkedin',
+            '"{agency}" real estate {city} linkedin',
+        ],
+        "valid": lambda u: (
+            "linkedin.com/in/" in u.lower() or
+            "linkedin.com/company/" in u.lower()
         ),
     },
-    "acres99_url": {
-        "query": 'site:99acres.com "{name}" bangalore agent',
-        "valid": lambda u: "99acres.com" in u and "agent" in u,
-    },
     "housing_url": {
-        "query": 'site:housing.com "{name}" bangalore agent',
-        "valid": lambda u: "housing.com" in u and ("agent" in u or "broker" in u),
+        "queries": [
+            '"{agency}" {name} real estate {city} housing.com',
+            '"{agency}" real estate {city} housing.com',
+        ],
+        "valid": lambda u: "housing.com" in u.lower(),
     },
     "nobroker_url": {
-        "query": 'site:nobroker.in "{name}" bangalore',
-        "valid": lambda u: "nobroker.in" in u and "agent" in u,
+        "queries": [
+            '"{agency}" {name} real estate {city} nobroker',
+            '"{agency}" real estate {city} nobroker',
+        ],
+        "valid": lambda u: "nobroker.in" in u.lower(),
     },
     "justdial_url": {
-        "query": 'site:justdial.com "{name}" bangalore real estate',
-        "valid": lambda u: "justdial.com" in u and "bangalore" in u.lower(),
+        "queries": [
+            '"{agency}" {name} real estate {city} justdial',
+            '"{agency}" real estate {city} justdial',
+        ],
+        "valid": lambda u: "justdial.com" in u.lower(),
+    },
+    "website_url": {
+        "queries": [
+            '"{agency}" {name} real estate broker {city}',
+            '"{agency}" real estate broker {city}',
+            '"{agency}" property consultants {city}',
+        ],
+        "valid": lambda u: not any(x in u.lower() for x in _WEBSITE_EXCLUDE),
+    },
+    "google_maps_url": {
+        "queries": [
+            '"{agency}" {name} real estate {city} google maps',
+            '"{agency}" real estate {city} google maps',
+        ],
+        "valid": lambda u: (
+            "google.com/maps" in u.lower() or
+            "maps.app.goo.gl" in u.lower()
+        ),
     },
 }
 
@@ -43,26 +98,58 @@ def _ddg_search(query: str) -> list[str]:
         return []
 
 
-async def find_portal_urls(name: str, city: str = "Bangalore") -> dict[str, str]:
+async def find_missing_urls(
+    broker: dict,
+    individual_name: str | None = None,
+    agency: str | None = None,
+) -> dict[str, str]:
     """
-    Search DDG for each portal's agent profile page for a given broker name.
-    Returns only portal keys where a valid profile URL was found.
+    Search DDG for any URL fields not yet in the broker record.
+    Returns {field_key: url} for newly found URLs only.
     """
+    missing = [k for k in SEARCH_TARGETS if not broker.get(k)]
+    if not missing:
+        return {}
+
+    org  = agency or broker.get("agency") or broker["name"]
+    name = individual_name or ""
+    city = broker.get("city", "Bangalore")
+
+    # When individual name is the same as agency (JustDial/Maps case), don't repeat it
+    name_differs = name and name.lower().strip() != org.lower().strip()
+
+    logger.info(f"DDG — agency='{org}' individual='{name or '—'}' city='{city}' targets={missing}")
     found: dict[str, str] = {}
 
-    for portal_key, cfg in PORTAL_SEARCH.items():
-        query = cfg["query"].format(name=name, city=city)
-        urls = await asyncio.to_thread(_ddg_search, query)
+    for field_key in missing:
+        cfg = SEARCH_TARGETS[field_key]
 
-        for url in urls:
-            if cfg["valid"](url.lower()):
-                found[portal_key] = url
-                logger.info(f"portal_url_finder | {portal_key} for '{name}': {url}")
+        for query_template in cfg["queries"]:
+            # Skip queries containing {name} when we have no distinct individual name
+            if "{name}" in query_template and not name_differs:
+                continue
+
+            query = query_template.format(
+                agency=org,
+                name=name if name_differs else "",
+                city=city,
+            ).strip()
+
+            urls = await asyncio.to_thread(_ddg_search, query)
+            logger.debug(f"  query: {query!r} → {len(urls)} results")
+
+            for url in urls:
+                if cfg["valid"](url):
+                    found[field_key] = url
+                    logger.info(f"DDG found {field_key} for '{org}': {url[:70]}")
+                    break
+
+            if field_key in found:
                 break
 
-        await asyncio.sleep(0.5)  # avoid DDG rate limiting between portal searches
+        await asyncio.sleep(0.5)
 
     if not found:
-        logger.info(f"portal_url_finder | no portal profiles found for '{name}'")
+        logger.info(f"DDG: no new URLs found for '{org}'")
 
     return found

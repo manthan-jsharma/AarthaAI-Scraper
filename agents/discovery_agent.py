@@ -3,17 +3,13 @@ from loguru import logger
 
 from config import settings
 from database.client import upsert_broker
-from agents.sources import magicbricks, acres99, housing, nobroker, justdial, google_maps, google_search
+from agents.sources import magicbricks, justdial, google_maps
 
 
 SOURCES = [
-    ("magicbricks", magicbricks.discover_brokers),
-    ("99acres", acres99.discover_brokers),
-    ("housing", housing.discover_brokers),
-    ("nobroker", nobroker.discover_brokers),
-    ("justdial", justdial.discover_brokers),
-    ("google_maps", google_maps.discover_brokers),
-    ("google_search", google_search.discover_brokers),
+    ("magicbricks", magicbricks.discover_brokers),  # 10 brokers — portal profiles + listings data
+    ("justdial",    justdial.discover_brokers),      # 10 brokers — phone + area + reviews
+    ("google_maps", google_maps.discover_brokers),   # 10 brokers — maps_url + phone + website
 ]
 
 

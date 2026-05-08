@@ -68,32 +68,32 @@ def ask_gemini(
 ) -> list | dict:
     """
     Call Gemini to extract structured data from content.
-    When response_schema is provided, Gemini is forced to return valid JSON
-    matching that Pydantic model — no parsing errors possible.
-    Without a schema, falls back to free-form JSON with _safe_json_parse.
+    Always uses response_mime_type=application/json to force valid JSON output.
+    If response_schema (Pydantic model) is provided, validates and fills defaults
+    after parsing — avoids Gemini API rejecting Pydantic's `default` schema fields.
     """
     try:
         gen_config = genai.GenerationConfig(
             temperature=0.1,
             max_output_tokens=2048,
-            **(
-                {"response_mime_type": "application/json", "response_schema": response_schema}
-                if response_schema else {}
-            ),
+            response_mime_type="application/json",
         )
         response = _model.generate_content(
             f"{prompt}\n\nPage content:\n{content}",
             generation_config=gen_config,
         )
         raw = response.text.strip()
-
-        if response_schema:
-            # Schema-mode: Gemini guarantees valid JSON, parse directly
-            return json.loads(raw)
-
-        # Free-form mode: strip markdown fences and parse with recovery
         raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
-        return _safe_json_parse(raw)
+        result = _safe_json_parse(raw)
+
+        if response_schema and result:
+            try:
+                validated = response_schema.model_validate(result)
+                return validated.model_dump()
+            except Exception:
+                return result
+
+        return result
 
     except Exception as e:
         logger.error(f"Gemini extraction failed: {e}")
