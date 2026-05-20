@@ -14,6 +14,54 @@ def _unwrap_google_url(url: str | None) -> str | None:
     return url
 
 
+async def find_on_google_maps(name: str, city: str = "Bangalore") -> dict:
+    """
+    Search Google Maps for a specific broker by name.
+    Returns {google_maps_url, google_business_data} or {} if not found.
+    Used to find Maps listings for brokers discovered from other sources.
+    """
+    query = f"{name} real estate {city}"
+    url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
+    logger.info(f"Google Maps lookup: {query!r}")
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_extra_http_headers({"User-Agent": "Mozilla/5.0"})
+            await page.goto(url, timeout=30000)
+            await page.wait_for_timeout(3000)
+
+            results = await page.query_selector_all("[class*='Nv2PK'], [role='article']")
+            if not results:
+                await browser.close()
+                return {}
+
+            # Take only the first result — most relevant match
+            first = results[0]
+            maps_link = await _safe_attr(first, "a", "href")
+            rating    = await _safe_text(first, "[class*='MW4etd']")
+            reviews   = await _safe_text(first, "[class*='UY7F9']")
+            address   = await _safe_text(first, "[class*='W4Efsd']:last-child")
+            await browser.close()
+
+            if not maps_link:
+                return {}
+
+            logger.info(f"Google Maps found for '{name}': {maps_link[:70]}")
+            return {
+                "google_maps_url": maps_link,
+                "google_business_data": {
+                    "rating": rating,
+                    "review_count": reviews,
+                    "address": address,
+                },
+            }
+    except Exception as e:
+        logger.error(f"Google Maps lookup failed for '{name}': {e}")
+        return {}
+
+
 async def discover_brokers(city: str = "Bangalore", max_results: int = 10) -> list[dict]:
     brokers = []
     query = f"real estate broker {city}"

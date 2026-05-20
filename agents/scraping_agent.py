@@ -155,7 +155,15 @@ async def scrape_broker(
     if portal_data:
         updates["portal_data"] = portal_data
 
-    # --- Step 2: Google Maps detail (phone + website) ---
+    # --- Step 2: Google Maps — find listing if not already known ---
+    if not broker.get("google_maps_url"):
+        search_name = agency_name or broker["name"]
+        found = await google_maps.find_on_google_maps(search_name, broker.get("city", "Bangalore"))
+        if found:
+            updates.update(found)
+            broker = {**broker, **found}
+
+    # --- Step 2c: Google Maps detail (phone + website) ---
     if broker.get("google_maps_url"):
         existing = broker.get("google_business_data") or {}
         logger.info(f"Scraping Google Maps details for {broker['name']}")

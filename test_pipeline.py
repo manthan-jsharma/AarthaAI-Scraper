@@ -147,11 +147,25 @@ async def run_broker(broker: dict, source: str) -> dict:
     elif source == "google_maps":
         _skip("Google Maps profile scrape — fetching business details instead (Step 2b)")
         # Google Maps: business name used as agency for DDG search
-        # DDG will search: "{name} real estate bangalore linkedin" etc.
         agency_name = broker.get("name")
         individual_name = None
 
-    # ── STEP 2b: Google Maps business details ────────────────────────────────
+    # ── STEP 2b: Google Maps lookup (find listing if not already known) ──────
+    _step("2b", "Google Maps lookup")
+    if not broker.get("google_maps_url"):
+        search_name = agency_name or broker["name"]
+        print(f"  Searching Maps for: {search_name!r}")
+        found = await google_maps.find_on_google_maps(search_name, broker.get("city", "Bangalore"))
+        if found:
+            broker.update(found)
+            _ok(f"Maps found: {found['google_maps_url'][:70]}")
+            _pp("Maps card data:", found.get("google_business_data", {}))
+        else:
+            _skip("Not found on Google Maps")
+    else:
+        _skip(f"Already have Maps URL: {broker['google_maps_url'][:60]}")
+
+    # ── STEP 2c: Google Maps business details ────────────────────────────────
     if broker.get("google_maps_url"):
         _step("2b", "Google Maps business details")
         maps = await google_maps.get_business_details(broker["google_maps_url"])
@@ -247,7 +261,7 @@ async def run_broker(broker: dict, source: str) -> dict:
     scores = {
         "score_website":          score_website(website_data),
         "score_social_media":     score_social_media(combined_social),
-        "score_linkedin":         score_linkedin(linkedin_data),
+        "score_linkedin":         score_linkedin(linkedin_data, broker.get("linkedin_url")),
         "score_google_business":  score_google_business(google_data),
         "score_property_portals": score_property_portals(portal_data, broker),
         "score_listings":         score_listings(portal_data),
@@ -305,11 +319,12 @@ async def main():
         portals = [p for p in ["magicbricks_url", "justdial_url", "housing_url",
                                 "nobroker_url", "acres99_url"] if b.get(p)]
         print(f"\n{b['name']}  [{source}]")
-        print(f"  Phone    : {b.get('phone', '—')}")
-        print(f"  Website  : {b.get('website_url', '—')}")
-        print(f"  LinkedIn : {b.get('linkedin_url', '—')}")
-        print(f"  Portals  : {[p.replace('_url','') for p in portals] or '—'}")
-        print(f"  Scores   : {scores}")
+        print(f"  Phone     : {b.get('phone', '—')}")
+        print(f"  Website   : {b.get('website_url', '—')}")
+        print(f"  LinkedIn  : {b.get('linkedin_url', '—')}")
+        print(f"  Google Maps: {b.get('google_maps_url', '—')[:70]}")
+        print(f"  Portals   : {[p.replace('_url','') for p in portals] or '—'}")
+        print(f"  Scores    : {scores}")
 
 
 if __name__ == "__main__":

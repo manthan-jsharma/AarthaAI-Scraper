@@ -25,10 +25,11 @@ def build_prompt(broker: dict) -> str:
         "Total": broker.get("total_score", 0),
     }
 
-    website_data = broker.get("website_data") or {}
-    social_data = broker.get("social_data") or {}
-    google_data = broker.get("google_business_data") or {}
-    portal_data = broker.get("portal_data") or {}
+    website_data   = broker.get("website_data") or {}
+    linkedin_data  = broker.get("linkedin_data") or {}
+    instagram_data = broker.get("instagram_data") or {}
+    google_data    = broker.get("google_business_data") or {}
+    portal_data    = broker.get("portal_data") or {}
 
     return f"""
 Broker: {broker.get('name')}
@@ -38,7 +39,8 @@ Scores: {scores}
 Website: has_website={website_data.get('has_website')}, has_blog={website_data.get('has_blog')}, seo_title={website_data.get('seo_title')}
 Google Business: rating={google_data.get('rating')}, reviews={google_data.get('review_count')}
 Active Portals: {list(portal_data.keys())}
-Social: posts_last_30_days={social_data.get('posts_last_30_days')}, followers={social_data.get('followers')}
+LinkedIn: followers={linkedin_data.get('followers')}, posts_last_30_days={linkedin_data.get('posts_last_30_days')}, has_property_content={linkedin_data.get('has_property_content')}
+Instagram: followers={instagram_data.get('followers')}, posts_last_30_days={instagram_data.get('posts_last_30_days')}, has_property_content={instagram_data.get('has_property_content')}
 
 Based on this data, provide:
 1. STRENGTHS (2-3 bullet points of what they're doing well)

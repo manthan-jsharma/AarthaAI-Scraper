@@ -22,12 +22,34 @@ def score_website(data: dict) -> int:
     return min(score, 30)
 
 
-def score_social_media(data: dict) -> int:
-    """Max 20 points — Instagram/Facebook activity signals."""
-    if not data:
-        return 0
+def score_social_media(data: dict, broker: dict | None = None) -> int:
+    """
+    Max 20 points.
+    Presence points: awarded just for having social URLs (found on website/DDG).
+    Activity points: awarded if profile was scraped and shows follower/post data.
+    """
     score = 0
+    broker = broker or {}
+    website_data = broker.get("website_data") or {}
+    social_links = [str(u).lower() for u in (website_data.get("social_links") or [])]
 
+    # ── Presence points (URL found — no scraping needed) ─────────────────────
+    if broker.get("instagram_url"):
+        score += 8
+
+    has_facebook = any("facebook.com" in u for u in social_links)
+    if has_facebook:
+        score += 5
+
+    has_youtube = any("youtube.com" in u for u in social_links)
+    if has_youtube:
+        score += 4
+
+    has_twitter = any("twitter.com" in u or "x.com" in u for u in social_links)
+    if has_twitter:
+        score += 2
+
+    # ── Activity points (only if profile was actually scraped) ────────────────
     followers = _to_int(data.get("followers"))
     if followers:
         if followers >= 5000:
@@ -40,32 +62,28 @@ def score_social_media(data: dict) -> int:
     posts_30d = _to_int(data.get("posts_last_30_days"))
     if posts_30d:
         if posts_30d >= 12:
-            score += 8
-        elif posts_30d >= 4:
-            score += 5
-        elif posts_30d >= 1:
-            score += 2
-
-    avg_likes = _to_int(data.get("avg_likes"))
-    if avg_likes:
-        if avg_likes >= 100:
             score += 4
-        elif avg_likes >= 20:
+        elif posts_30d >= 4:
             score += 2
-        elif avg_likes >= 5:
+        elif posts_30d >= 1:
             score += 1
 
     if data.get("has_property_content"):
-        score += 3
+        score += 2
 
     return min(score, 20)
 
 
-def score_linkedin(data: dict) -> int:
+def score_linkedin(data: dict, linkedin_url: str | None = None) -> int:
     """Max 10 points."""
-    if not data:
-        return 0
     score = 0
+
+    # 1 point just for having a LinkedIn presence (URL exists)
+    if linkedin_url:
+        score += 1
+
+    if not data:
+        return score
 
     # Followers / connections
     connections = _to_int(data.get("connections") or data.get("followers"))
@@ -207,8 +225,8 @@ def calculate_and_save_scores(
 
     scores = {
         "score_website": score_website(website_data),
-        "score_social_media": score_social_media(combined_social),
-        "score_linkedin": score_linkedin(linkedin_data),
+        "score_social_media": score_social_media(combined_social, broker),
+        "score_linkedin": score_linkedin(linkedin_data, broker.get("linkedin_url")),
         "score_google_business": score_google_business(google_data),
         "score_property_portals": score_property_portals(portal_data, broker),
         "score_listings": score_listings(portal_data),

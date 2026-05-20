@@ -23,6 +23,15 @@ _WEBSITE_EXCLUDE = [
     "magicbricks", "99acres", "housing.com", "nobroker", "justdial",
     "realestateindia.com", "commonfloor", "proptiger", "squareyards",
     "makaan", "sulekha", "olx", "indiamart",
+    # classified / aggregator sites (not a broker's own site)
+    "click.in", "clickindia.com", "quikr.com", "olx.in",
+    # local business directories
+    "indianyellowpages.com", "magicpin.in", "justdial.com", "sulekha.com",
+    "tradeindia.com", "exportersindia.com", "localfyynd.com",
+    "brownbook.net", "cylex-india.com", "bizindiaonline.com",
+    "asklaila.com", "yolist.in", "getit.in", "yellowpages.in",
+    # city news / city story / city directory sites (e.g. chandigarhstory.com)
+    "story.com", "cityguide", "cityshor", "localcircles",
     # social / search
     "linkedin", "instagram", "facebook", "youtube", "twitter", "google.com",
     # knowledge / forums
@@ -71,30 +80,39 @@ SEARCH_TARGETS: dict[str, dict] = {
     },
     "website_url": {
         "queries": [
-            '"{agency}" {name} real estate broker {city}',
-            '"{agency}" real estate broker {city}',
-            '"{agency}" property consultants {city}',
+            '{name} "{agency}" real estate {city} site',
+            '"{agency}" real estate {city} official website',
+            '"{agency}" property broker {city}',
         ],
         "valid": lambda u: not any(x in u.lower() for x in _WEBSITE_EXCLUDE),
     },
-    "google_maps_url": {
-        "queries": [
-            '"{agency}" {name} real estate {city} google maps',
-            '"{agency}" real estate {city} google maps',
-        ],
-        "valid": lambda u: (
-            "google.com/maps" in u.lower() or
-            "maps.app.goo.gl" in u.lower()
-        ),
-    },
+    # google_maps_url is handled by google_maps.find_on_google_maps() in scraping_agent.py
+    # DDG cannot reliably find google.com/maps URLs (Google blocks DDG from indexing Maps)
 }
+
+
+_DDG_TIMEOUT = 10  # seconds per query before giving up
 
 
 def _ddg_search(query: str) -> list[str]:
     try:
-        results = DDGS().text(query, max_results=5)
+        # timeout= sets the HTTP client timeout inside DDGS
+        results = DDGS(timeout=8).text(query, max_results=5)
         return [r["href"] for r in results if r.get("href")]
-    except Exception:
+    except Exception as e:
+        logger.warning(f"DDG search failed for {query!r}: {type(e).__name__}: {e}")
+        return []
+
+
+async def _ddg_search_safe(query: str) -> list[str]:
+    """Run DDG search in a thread with a hard timeout to prevent hangs."""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_ddg_search, query),
+            timeout=_DDG_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"DDG timeout ({_DDG_TIMEOUT}s) for query: {query!r}")
         return []
 
 
@@ -111,12 +129,16 @@ async def find_missing_urls(
     if not missing:
         return {}
 
-    org  = agency or broker.get("agency") or broker["name"]
+    org  = agency or broker.get("agency") or broker.get("name", "")
     name = individual_name or ""
-    city = broker.get("city", "Bangalore")
+    city = "Bangalore"  # always target Bangalore — tool is Bangalore-specific
+
+    if not org:
+        logger.warning("DDG: broker has no name or agency — skipping")
+        return {}
 
     # When individual name is the same as agency (JustDial/Maps case), don't repeat it
-    name_differs = name and name.lower().strip() != org.lower().strip()
+    name_differs = bool(name and name.lower().strip() != org.lower().strip())
 
     logger.info(f"DDG — agency='{org}' individual='{name or '—'}' city='{city}' targets={missing}")
     found: dict[str, str] = {}
@@ -135,8 +157,8 @@ async def find_missing_urls(
                 city=city,
             ).strip()
 
-            urls = await asyncio.to_thread(_ddg_search, query)
-            logger.debug(f"  query: {query!r} → {len(urls)} results")
+            urls = await _ddg_search_safe(query)
+            logger.info(f"  DDG query: {query!r} → {len(urls)} results")
 
             for url in urls:
                 if cfg["valid"](url):
@@ -147,7 +169,8 @@ async def find_missing_urls(
             if field_key in found:
                 break
 
-        await asyncio.sleep(0.5)
+            # Pause between queries — prevents DDG rate-limiting across 30 brokers
+            await asyncio.sleep(1.5)
 
     if not found:
         logger.info(f"DDG: no new URLs found for '{org}'")

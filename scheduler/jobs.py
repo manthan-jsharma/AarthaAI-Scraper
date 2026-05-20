@@ -5,38 +5,64 @@ from loguru import logger
 
 scheduler = BackgroundScheduler()
 
+# Prevents two pipeline runs overlapping if one takes longer than expected
+_pipeline_running = False
 
-def _run_async(coro):
-    asyncio.run(coro)
 
+def run_full_pipeline():
+    global _pipeline_running
 
-def daily_pipeline():
-    logger.info("Scheduled daily pipeline starting...")
-    from agents.discovery_agent import run_discovery
-    from agents.scraping_agent import scrape_all_brokers
-    from insights.groq_engine import generate_insights_for_all
-    from output.sheets import export_brokers_to_sheets
+    if _pipeline_running:
+        logger.warning("Pipeline already running — skipping this trigger")
+        return
+
+    _pipeline_running = True
+    logger.info("Scheduled pipeline starting...")
 
     async def pipeline():
-        await run_discovery()
-        await scrape_all_brokers()
-        generate_insights_for_all()
-        export_brokers_to_sheets()
+        from agents.discovery_agent import run_discovery
+        from agents.scraping_agent import scrape_all_brokers
+        from insights.groq_engine import generate_insights_for_all
+        from database.client import create_pipeline_run, complete_pipeline_run, fail_pipeline_run
 
-    _run_async(pipeline())
-    logger.info("Daily pipeline complete.")
+        run = create_pipeline_run()
+        run_id = run.get("id")
+        run_number = run.get("run_number")
+
+        try:
+            brokers = await run_discovery()
+            await scrape_all_brokers(pipeline_run_id=run_id, run_number=run_number)
+            await asyncio.to_thread(generate_insights_for_all)
+            complete_pipeline_run(run_id, brokers_scraped=len(brokers))
+            logger.info(f"Scheduled pipeline complete — run #{run_number}, {len(brokers)} brokers")
+        except Exception as e:
+            logger.error(f"Scheduled pipeline failed: {e}")
+            if run_id:
+                fail_pipeline_run(run_id)
+
+    try:
+        asyncio.run(pipeline())
+    finally:
+        _pipeline_running = False
 
 
 def start_scheduler():
-    # Run every day at 2 AM
+    # 3:00 PM IST
     scheduler.add_job(
-        daily_pipeline,
-        trigger=CronTrigger(hour=2, minute=0),
-        id="daily_pipeline",
+        run_full_pipeline,
+        trigger=CronTrigger(hour=15, minute=0, timezone="Asia/Kolkata"),
+        id="pipeline_3pm",
+        replace_existing=True,
+    )
+    # 7:00 PM IST
+    scheduler.add_job(
+        run_full_pipeline,
+        trigger=CronTrigger(hour=19, minute=0, timezone="Asia/Kolkata"),
+        id="pipeline_7pm",
         replace_existing=True,
     )
     scheduler.start()
-    logger.info("APScheduler started — daily pipeline at 2:00 AM")
+    logger.info("Scheduler started — pipeline runs at 3:00 PM and 7:00 PM IST")
 
 
 def stop_scheduler():
